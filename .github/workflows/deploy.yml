@@ -1,0 +1,265 @@
+# This is a reusable workflow! Don't trigger it directly, call it as part of
+# another workflow and pass appropriate inputs
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      # TODO: this could conceivable be tuned to a cluster/DB set/DB set
+      # TODO: should probably validate this /shrug
+      target_env:
+        description: 'The environment that the deployment will target (staging | prod)'
+        default: 'staging'
+        type: 'string'
+        required: true
+      target_cluster:
+        description: 'The cluster to deploy to'
+        default: 'QA2'
+        type: 'string'
+        required: true
+      target_sgs:
+        description: 'Security groups to run one-off migration tasks with'
+        type: 'string'
+        required: true
+      target_subnet:
+        description: 'Subnet to run one-off migration tasks with'
+        type: 'string'
+        required: true
+      ecr_registry:
+        default: '875437709101.dkr.ecr.us-west-2.amazonaws.com'
+        type: 'string'
+        required: true
+      service:
+        description: 'Service name (e.g. learning)'
+        type: 'string'
+        required: true
+      image_tag:
+        description: 'Unique tag for ECR image (e.g. git sha)'
+        type: 'string'
+        required: true
+    secrets:
+      aws-access-key-id:
+        required: true
+      aws-secret-access-key:
+        required: true
+
+jobs:
+  create-gh-deployment:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOYMENT_PATH: ${{ inputs.target_env }}-deployment-id
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          # N.B. We specify a ref here to avoid the checkout action automatically merging with mainline.
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      - name: Create ${{ inputs.target_env }} deployment (pending)
+        run: |
+          DEPLOYMENT_ID=$(./bin/gh-deployment.sh ${{ github.token }} ${{ inputs.target_env }} create)
+          echo "$DEPLOYMENT_ID" > $DEPLOYMENT_PATH
+          ./bin/gh-deployment.sh ${{ github.token }} ${{ inputs.target_env }} update $DEPLOYMENT_ID pending
+
+      - name: Store deployment ID for later
+        uses: actions/upload-artifact@v2
+        with:
+          name: deployment
+          path: ${{ env.DEPLOYMENT_PATH }}
+          retention-days: 5
+
+  deploy-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.aws-access-key-id }}
+          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
+          aws-region: us-west-2
+          mask-aws-account-id: "no"
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR for ${{ inputs.target_env }}
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ inputs.ecr_registry }}
+          ECR_REPOSITORY: pathstream/${{ inputs.service }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          LATEST=latest-${{ inputs.target_env }}
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST || true
+          printf $IMAGE_TAG > REVISION
+          docker build --build-arg IMAGE_TAG=$IMAGE_TAG --cache-from $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST
+          echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          # these outputs do not seem to work at across job boundaries (maybe
+          # because we're in a reusable workflow)
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "::set-output name=testing::true"
+
+  deploy-migrations:
+    needs: deploy-image
+    runs-on: ubuntu-latest
+    env:
+      TARGET_CLUSTER: ${{ inputs.target_cluster }}
+      SUBNET: ${{ inputs.target_subnet }}
+      SGS: ${{ inputs.target_sgs }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.aws-access-key-id }}
+          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
+          aws-region: us-west-2
+
+      - name: Download ${{ inputs.service }}-migration-${{ inputs.target_env }} task definition
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ inputs.service }}-migration-${{ inputs.target_env }} --query taskDefinition > migration-task-definition.json
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: render-migration-container-no-firelens
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          image: ${{ format('{0}/pathstream/{1}:{2}', inputs.ecr_registry, inputs.service, inputs.image_tag) }}
+          task-definition: migration-task-definition.json
+          container-name: ${{ inputs.service }}-api
+
+      - name: Fill in the new version in the Amazon firelens ECS
+        id: render-migration-container-no-version
+        uses: aws-actions/amazon-ecs-render-task-definition@master
+        with:
+          environment-variables: |
+            DD_VERSION=${{ github.sha }}
+          image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
+          task-definition: ${{ steps.render-migration-container-no-firelens.outputs.task-definition }}
+          container-name: log_router
+
+      - name: Fill in the new tracer version in the Amazon ECS ${{ matrix.service }} task definition
+        id: render-migration-container
+        uses: aws-actions/amazon-ecs-render-task-definition@master
+        with:
+          environment-variables: |
+            DD_VERSION=${{ inputs.image_tag }}
+          task-definition: ${{ steps.render-migration-container-no-version.outputs.task-definition }}
+          container-name: datadog-agent
+          image: "public.ecr.aws/datadog/agent:latest"
+
+      - name: Update migration ECS task definition with latest image
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          # omitting `service` input means "just register the task definition, don't deploy"
+          task-definition: ${{ steps.render-migration-container.outputs.task-definition }}
+
+      - name: Run migrations in one-off ECS task
+        run: |
+          echo "Subnet: $SUBNET"
+          echo "Security groups: $SGS"
+          aws ecs run-task --task-definition ${{ inputs.service }}-migration-${{ inputs.target_env }} \
+                           --cluster $TARGET_CLUSTER \
+                           --launch-type FARGATE \
+                           --network-configuration="awsvpcConfiguration={subnets=[$SUBNET],securityGroups=[$SGS],assignPublicIp=DISABLED}" > migration-task.json
+
+          TASK_ARN=$(jq -r '.tasks[0].taskArn' < ./migration-task.json)
+          echo "Migration task arn: $TASK_ARN"
+          aws ecs wait tasks-stopped --tasks "$TASK_ARN" --cluster $TARGET_CLUSTER
+          echo "Migration finished"
+          CONTAINER_EXIT_CODE=$(aws ecs describe-tasks --tasks "$TASK_ARN" --cluster $TARGET_CLUSTER | jq -r '.tasks[0].containers[0].exitCode')
+          echo "Migration container exit code: $CONTAINER_EXIT_CODE"
+          exit $CONTAINER_EXIT_CODE
+
+  deploy-app-services:
+    needs: [deploy-image, deploy-migrations]
+    runs-on: ubuntu-latest
+    env:
+      TARGET_CLUSTER: ${{ inputs.target_env == 'prod' && 'prod2' || 'QA2' }}
+    strategy:
+      matrix:
+        service: ["api", "worker"]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.aws-access-key-id }}
+          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
+          aws-region: us-west-2
+          mask-aws-account-id: "no"
+
+      - name: Download ${{ inputs.service }}-${{ matrix.service }}-${{ inputs.target_env }} task definition
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ inputs.service }}-${{ matrix.service }}-${{ inputs.target_env }} --query taskDefinition > ${{ matrix.service }}-task-definition.json
+
+      # We have 3 Docker containers in our task definition and they all need the image tag.
+      # Unfortunately this is the documented way to do that - one container at a time.
+      - name: Fill in the new image ID in the Amazon ECS ${{ matrix.service }} task definition
+        id: render-app-container-no-log
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ matrix.service }}-task-definition.json
+          container-name: ${{ inputs.service }}-${{ matrix.service }}
+          image: ${{ format('{0}/pathstream/{1}:{2}', inputs.ecr_registry, inputs.service, inputs.image_tag) }}
+
+      - name: Fill in the new logger version in the Amazon ECS ${{ matrix.service }} task definition
+        id: render-app-container-no-version
+        uses: aws-actions/amazon-ecs-render-task-definition@master
+        with:
+          environment-variables: |
+            DD_VERSION=${{ inputs.image_tag }}
+          task-definition: ${{ steps.render-app-container-no-log.outputs.task-definition }}
+          container-name: log_router
+          image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
+
+      - name: Fill in the new tracer version in the Amazon ECS ${{ matrix.service }} task definition
+        id: render-app-container
+        uses: aws-actions/amazon-ecs-render-task-definition@master
+        with:
+          environment-variables: |
+            DD_VERSION=${{ inputs.image_tag }}
+          task-definition: ${{ steps.render-app-container-no-version.outputs.task-definition }}
+          container-name: datadog-agent
+          image: "public.ecr.aws/datadog/agent:latest"
+
+      - name: Deploy ${{ inputs.service }}-${{ matrix.service }}-${{ inputs.target_env }} to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-app-container.outputs.task-definition }}
+          service: ${{ inputs.service }}-${{ matrix.service }}
+          cluster: ${{ env.TARGET_CLUSTER }}
+          wait-for-service-stability: true
+
+  update-gh-deployment:
+    runs-on: ubuntu-latest
+    needs: [create-gh-deployment, deploy-migrations, deploy-app-services]
+    env:
+      DEPLOYMENT_PATH: ${{ inputs.target_env }}-deployment-id
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      # Workaround for job-level outputs
+      - name: Download deployment ID
+        uses: actions/download-artifact@v2
+        with:
+          name: deployment
+
+      - name: Update deployment status (success)
+        if: success()
+        run: |
+          DEPLOYMENT_ID=$(cat ${DEPLOYMENT_PATH})
+          ./bin/gh-deployment.sh ${{ github.token }} ${{ inputs.target_env }} update $DEPLOYMENT_ID success
+
+      - name: Update deployment status (failure)
+        if: failure()
+        run: |
+          DEPLOYMENT_ID=$(cat ${DEPLOYMENT_PATH})
+          ./bin/gh-deployment.sh ${{ github.token }} ${{ inputs.target_env }} update $DEPLOYMENT_ID failure
