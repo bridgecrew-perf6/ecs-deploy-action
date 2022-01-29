@@ -14,7 +14,6 @@ on:
         required: true
       target_cluster:
         description: 'The cluster to deploy to'
-        default: 'QA2'
         type: 'string'
         required: true
       target_sgs:
@@ -26,7 +25,6 @@ on:
         type: 'string'
         required: true
       ecr_registry:
-        default: '875437709101.dkr.ecr.us-west-2.amazonaws.com'
         type: 'string'
         required: true
       service:
