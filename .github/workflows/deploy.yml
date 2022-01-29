@@ -175,7 +175,7 @@ jobs:
     needs: [deploy-image, deploy-migrations]
     runs-on: ubuntu-latest
     env:
-      TARGET_CLUSTER: ${{ inputs.target_env == 'prod' && 'prod2' || 'QA2' }}
+      TARGET_CLUSTER: ${{ inputs.target_cluster }}
     strategy:
       matrix:
         service: ["api", "worker"]
