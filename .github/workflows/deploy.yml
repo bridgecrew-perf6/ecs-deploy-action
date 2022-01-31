@@ -35,6 +35,11 @@ on:
         description: 'Unique tag for ECR image (must be the desired git sha)'
         type: 'string'
         required: true
+      service_list:
+        description: 'JSON array of services to deploy'
+        type: 'string'
+        default: '["api", "worker"]'
+        required: false
     secrets:
       aws-access-key-id:
         required: true
@@ -134,7 +139,7 @@ jobs:
         uses: aws-actions/amazon-ecs-render-task-definition@master
         with:
           environment-variables: |
-            DD_VERSION=${{ github.sha }}
+            DD_VERSION=${{ inputs.image_sha }}
           image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
           task-definition: ${{ steps.render-migration-container-no-firelens.outputs.task-definition }}
           container-name: log_router
@@ -179,7 +184,7 @@ jobs:
       TARGET_CLUSTER: ${{ inputs.target_cluster }}
     strategy:
       matrix:
-        service: ["api", "worker"]
+        service: ${{ fromJSON(inputs.service_list) }}
 
     steps:
       - uses: actions/checkout@v2
