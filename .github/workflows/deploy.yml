@@ -31,8 +31,8 @@ on:
         description: 'Service name (e.g. learning)'
         type: 'string'
         required: true
-      image_tag:
-        description: 'Unique tag for ECR image (e.g. git sha)'
+      image_sha:
+        description: 'Unique tag for ECR image (must be the desired git sha)'
         type: 'string'
         required: true
     secrets:
@@ -49,8 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
         with:
-          # N.B. We specify a ref here to avoid the checkout action automatically merging with mainline.
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          ref: ${{ inputs.image_sha }}
 
       - name: Create ${{ inputs.target_env }} deployment (pending)
         run: |
@@ -69,6 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+        with:
+          ref: ${{ inputs.image_sha }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -87,7 +88,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ inputs.ecr_registry }}
           ECR_REPOSITORY: pathstream/${{ inputs.service }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_TAG: ${{ inputs.image_sha }}
         run: |
           LATEST=latest-${{ inputs.target_env }}
           docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST || true
@@ -124,7 +125,7 @@ jobs:
         id: render-migration-container-no-firelens
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          image: ${{ format('{0}/pathstream/{1}:{2}', inputs.ecr_registry, inputs.service, inputs.image_tag) }}
+          image: ${{ format('{0}/pathstream/{1}:{2}', inputs.ecr_registry, inputs.service, inputs.image_sha) }}
           task-definition: migration-task-definition.json
           container-name: ${{ inputs.service }}-api
 
@@ -143,7 +144,7 @@ jobs:
         uses: aws-actions/amazon-ecs-render-task-definition@master
         with:
           environment-variables: |
-            DD_VERSION=${{ inputs.image_tag }}
+            DD_VERSION=${{ inputs.image_sha }}
           task-definition: ${{ steps.render-migration-container-no-version.outputs.task-definition }}
           container-name: datadog-agent
           image: "public.ecr.aws/datadog/agent:latest"
@@ -182,6 +183,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
+        with:
+          ref: ${{ inputs.image_sha }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -203,14 +206,14 @@ jobs:
         with:
           task-definition: ${{ matrix.service }}-task-definition.json
           container-name: ${{ inputs.service }}-${{ matrix.service }}
-          image: ${{ format('{0}/pathstream/{1}:{2}', inputs.ecr_registry, inputs.service, inputs.image_tag) }}
+          image: ${{ format('{0}/pathstream/{1}:{2}', inputs.ecr_registry, inputs.service, inputs.image_sha) }}
 
       - name: Fill in the new logger version in the Amazon ECS ${{ matrix.service }} task definition
         id: render-app-container-no-version
         uses: aws-actions/amazon-ecs-render-task-definition@master
         with:
           environment-variables: |
-            DD_VERSION=${{ inputs.image_tag }}
+            DD_VERSION=${{ inputs.image_sha }}
           task-definition: ${{ steps.render-app-container-no-log.outputs.task-definition }}
           container-name: log_router
           image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
@@ -220,7 +223,7 @@ jobs:
         uses: aws-actions/amazon-ecs-render-task-definition@master
         with:
           environment-variables: |
-            DD_VERSION=${{ inputs.image_tag }}
+            DD_VERSION=${{ inputs.image_sha }}
           task-definition: ${{ steps.render-app-container-no-version.outputs.task-definition }}
           container-name: datadog-agent
           image: "public.ecr.aws/datadog/agent:latest"
@@ -242,7 +245,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          ref: ${{ inputs.image_sha }}
 
       # Workaround for job-level outputs
       - name: Download deployment ID
