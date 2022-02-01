@@ -115,7 +115,6 @@ jobs:
   deploy-migrations:
     needs: deploy-image
     runs-on: ubuntu-latest
-    if: ${{ inputs.run_migrations }}
     env:
       TARGET_CLUSTER: ${{ inputs.target_cluster }}
       SUBNET: ${{ inputs.target_subnet }}
@@ -129,10 +128,12 @@ jobs:
           aws-region: us-west-2
 
       - name: Download ${{ inputs.service }}-migration-${{ inputs.target_env }} task definition
+        if: ${{ inputs.run_migrations }}
         run: |
           aws ecs describe-task-definition --task-definition ${{ inputs.service }}-migration-${{ inputs.target_env }} --query taskDefinition > migration-task-definition.json
 
       - name: Fill in the new image ID in the Amazon ECS task definition
+        if: ${{ inputs.run_migrations }}
         id: render-migration-container-no-firelens
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
@@ -141,6 +142,7 @@ jobs:
           container-name: ${{ inputs.service }}-api
 
       - name: Fill in the new version in the Amazon firelens ECS
+        if: ${{ inputs.run_migrations }}
         id: render-migration-container-no-version
         uses: aws-actions/amazon-ecs-render-task-definition@master
         with:
@@ -151,6 +153,7 @@ jobs:
           container-name: log_router
 
       - name: Fill in the new tracer version in the Amazon ECS ${{ matrix.service }} task definition
+        if: ${{ inputs.run_migrations }}
         id: render-migration-container
         uses: aws-actions/amazon-ecs-render-task-definition@master
         with:
@@ -161,12 +164,14 @@ jobs:
           image: "public.ecr.aws/datadog/agent:latest"
 
       - name: Update migration ECS task definition with latest image
+        if: ${{ inputs.run_migrations }}
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           # omitting `service` input means "just register the task definition, don't deploy"
           task-definition: ${{ steps.render-migration-container.outputs.task-definition }}
 
       - name: Run migrations in one-off ECS task
+        if: ${{ inputs.run_migrations }}
         run: |
           echo "Subnet: $SUBNET"
           echo "Security groups: $SGS"
@@ -184,7 +189,7 @@ jobs:
           exit $CONTAINER_EXIT_CODE
 
   deploy-app-services:
-    needs: ${{ (inputs.run_migrations && ["deploy-image", "deploy-migrations"] || ["deploy-image"]) }}
+    needs: [deploy-image, deploy-migrations]
     runs-on: ubuntu-latest
     env:
       TARGET_CLUSTER: ${{ inputs.target_cluster }}
