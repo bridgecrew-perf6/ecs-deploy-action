@@ -40,6 +40,11 @@ on:
         type: 'string'
         default: '["api", "worker"]'
         required: false
+      run_migrations:
+        description: "Should migrations be run as a one-off task before deployment?"
+        type: 'boolean'
+        default: true
+        required: false
     secrets:
       aws-access-key-id:
         required: true
@@ -179,6 +184,7 @@ jobs:
 
   deploy-app-services:
     needs: [deploy-image, deploy-migrations]
+    if: ${{ inputs.run_migrations }}
     runs-on: ubuntu-latest
     env:
       TARGET_CLUSTER: ${{ inputs.target_cluster }}
