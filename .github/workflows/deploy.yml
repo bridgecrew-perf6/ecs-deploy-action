@@ -184,7 +184,7 @@ jobs:
           exit $CONTAINER_EXIT_CODE
 
   deploy-app-services:
-    needs: ${{ inputs.run_migrations && ["deploy-image", "deploy-migrations"] || ["deploy-image"] }}
+    needs: ${{ (inputs.run_migrations && ["deploy-image", "deploy-migrations"] || ["deploy-image"]) }}
     runs-on: ubuntu-latest
     env:
       TARGET_CLUSTER: ${{ inputs.target_cluster }}
