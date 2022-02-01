@@ -115,6 +115,7 @@ jobs:
   deploy-migrations:
     needs: deploy-image
     runs-on: ubuntu-latest
+    if: ${{ inputs.run_migrations }}
     env:
       TARGET_CLUSTER: ${{ inputs.target_cluster }}
       SUBNET: ${{ inputs.target_subnet }}
@@ -184,7 +185,6 @@ jobs:
 
   deploy-app-services:
     needs: [deploy-image, deploy-migrations]
-    if: ${{ inputs.run_migrations }}
     runs-on: ubuntu-latest
     env:
       TARGET_CLUSTER: ${{ inputs.target_cluster }}
