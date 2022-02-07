@@ -103,7 +103,7 @@ jobs:
           LATEST=latest-${{ inputs.target_env }}
           docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST || true
           printf $IMAGE_TAG > REVISION
-          docker build --build-arg IMAGE_TAG=$IMAGE_TAG --cache-from $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST .
+          docker build --build-arg IMAGE_TAG=$IMAGE_TAG --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST
           echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
