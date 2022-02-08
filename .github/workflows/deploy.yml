@@ -35,6 +35,16 @@ on:
         description: 'Unique tag for ECR image (must be the desired git sha)'
         type: 'string'
         required: true
+      service_list:
+        description: 'JSON array of services to deploy'
+        type: 'string'
+        default: '["api", "worker"]'
+        required: false
+      run_migrations:
+        description: "Should migrations be run as a one-off task before deployment?"
+        type: 'boolean'
+        default: true
+        required: false
     secrets:
       aws-access-key-id:
         required: true
@@ -93,7 +103,7 @@ jobs:
           LATEST=latest-${{ inputs.target_env }}
           docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST || true
           printf $IMAGE_TAG > REVISION
-          docker build --build-arg IMAGE_TAG=$IMAGE_TAG --cache-from $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST .
+          docker build --build-arg IMAGE_TAG=$IMAGE_TAG --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$LATEST
           echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
@@ -118,10 +128,12 @@ jobs:
           aws-region: us-west-2
 
       - name: Download ${{ inputs.service }}-migration-${{ inputs.target_env }} task definition
+        if: ${{ inputs.run_migrations }}
         run: |
           aws ecs describe-task-definition --task-definition ${{ inputs.service }}-migration-${{ inputs.target_env }} --query taskDefinition > migration-task-definition.json
 
       - name: Fill in the new image ID in the Amazon ECS task definition
+        if: ${{ inputs.run_migrations }}
         id: render-migration-container-no-firelens
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
@@ -130,16 +142,18 @@ jobs:
           container-name: ${{ inputs.service }}-api
 
       - name: Fill in the new version in the Amazon firelens ECS
+        if: ${{ inputs.run_migrations }}
         id: render-migration-container-no-version
         uses: aws-actions/amazon-ecs-render-task-definition@master
         with:
           environment-variables: |
-            DD_VERSION=${{ github.sha }}
+            DD_VERSION=${{ inputs.image_sha }}
           image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
           task-definition: ${{ steps.render-migration-container-no-firelens.outputs.task-definition }}
           container-name: log_router
 
       - name: Fill in the new tracer version in the Amazon ECS ${{ matrix.service }} task definition
+        if: ${{ inputs.run_migrations }}
         id: render-migration-container
         uses: aws-actions/amazon-ecs-render-task-definition@master
         with:
@@ -150,12 +164,14 @@ jobs:
           image: "public.ecr.aws/datadog/agent:latest"
 
       - name: Update migration ECS task definition with latest image
+        if: ${{ inputs.run_migrations }}
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           # omitting `service` input means "just register the task definition, don't deploy"
           task-definition: ${{ steps.render-migration-container.outputs.task-definition }}
 
       - name: Run migrations in one-off ECS task
+        if: ${{ inputs.run_migrations }}
         run: |
           echo "Subnet: $SUBNET"
           echo "Security groups: $SGS"
@@ -179,7 +195,7 @@ jobs:
       TARGET_CLUSTER: ${{ inputs.target_cluster }}
     strategy:
       matrix:
-        service: ["api", "worker"]
+        service: ${{ fromJSON(inputs.service_list) }}
 
     steps:
       - uses: actions/checkout@v2
