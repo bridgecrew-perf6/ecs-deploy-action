@@ -148,7 +148,7 @@ jobs:
         with:
           environment-variables: |
             DD_VERSION=${{ inputs.image_sha }}
-          image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
+          image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:2.23.4"
           task-definition: ${{ steps.render-migration-container-no-firelens.outputs.task-definition }}
           container-name: log_router
 
